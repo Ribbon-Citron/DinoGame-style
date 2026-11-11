@@ -13,6 +13,17 @@
 
 プレイヤーや障害物を画像データへ変更する具体的なコード例への差し替えや、
 追加機能（空飛ぶ障害物、ハイスコア記録など）の実装をご希望の際はお申し付けください。
+
+スマホでの表示崩れ・レスポンシブ対応（画面サイズへの追従、タッチ操作の向上、画面揺れ・不要な画面ズームの防止）を実施し、Web Audio APIによる効果音（ジャンプ音・ゲームオーバー音）を追加した完全版のコードを作成しました。
+修正・追加ポイント
+1.  **スマホ表示の最適化**:
+      - CSSの`aspect-ratio`と`width: 100%`を利用し、スマホの縦横サイズに合わせてアスペクト比を維持しながら自動伸縮するように設定しました。
+      - `touch-action: manipulation` と `meta viewport` を追加し、連続タップによる不要な拡大ズームやスクロールを抑制しました。
+2.  **効果音（SE）の追加**:
+      - 外部音声ファイルを読み込む必要のない **Web Audio API** を採用し、ジャンプ時と衝突（ゲームオーバー）時に音を鳴らすように設定しました。
+      - ブラウザの自動再生制御に対応するため、初回のタップ／キー入力のタイミングでオーディオコンテキストを起動するようにしています。
+
+      ハイスコアの保存機能（LocalStorage）や障害物のバリエーション追加など、さらに調整したい点がありましたらお申し付けください。
 -->
 
 <!DOCTYPE html>
@@ -20,9 +31,17 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- スマホでの拡大防止とビューポート設定 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>恐竜の障害物ジャンプゲーム</title>
     <style>
+        * {
+            box-sizing: border-box;
+            -webkit-user-select: none;
+            /* タッチ時のテキスト選択防止 */
+            user-select: none;
+        }
+
         body {
             margin: 0;
             padding: 0;
@@ -32,30 +51,102 @@
             min-height: 100vh;
             background-color: #e0e0e0;
             font-family: sans-serif;
+            touch-action: manipulation;
+            /* 連打ズームの防止 */
+            overflow: hidden;
+            /* スクロール防止 */
+        }
+
+        .game-container {
+            width: 100%;
+            max-width: 800px;
+            padding: 10px;
+            display: flex;
+            justify-content: center;
         }
 
         canvas {
             background-color: #f7f7f7;
             border: 1px solid #ccc;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            /* レスポンシブ対応: アスペクト比を保ったまま縮小 */
+            width: 100%;
+            height: auto;
+            max-width: 800px;
+            aspect-ratio: 800 / 300;
+            display: block;
         }
     </style>
 </head>
 
 <body>
 
-    <canvas id="gameCanvas" width="800" height="300"></canvas>
+    <div class="game-container">
+        <canvas id="gameCanvas" width="800" height="300"></canvas>
+    </div>
 
     <script>
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
 
+        // --- Web Audio API（効果音再生） ---
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx = null;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new AudioContext();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        // ジャンプ音（ピヨッと上がる音）
+        function playJumpSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(600, audioCtx.currentTime + 0.15);
+
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.15);
+        }
+
+        // ゲームオーバー音（低く下がる音）
+        function playGameOverSound() {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(60, audioCtx.currentTime + 0.4);
+
+            gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.4);
+        }
+
         // --- ゲーム定数・設定 ---
         const CANVAS_WIDTH = canvas.width;
         const CANVAS_HEIGHT = canvas.height;
-        const GROUND_Y = CANVAS_HEIGHT - 20; // 地面のY座標 (280px)
+        const GROUND_Y = CANVAS_HEIGHT - 20;
 
-        // ゲーム状態: 'START', 'PLAYING', 'GAMEOVER'
         let gameState = 'START';
         let score = 0;
         let animationFrameId = null;
@@ -71,9 +162,7 @@
             jumpPower: -13,
             isGrounded: true,
 
-            // カスタマイズ可能な描画処理
             draw: function (ctx) {
-                // デフォルト描画：緑色の四角形（目付き）
                 ctx.fillStyle = '#2e7d32';
                 ctx.fillRect(this.x, this.y, this.width, this.height);
 
@@ -97,20 +186,19 @@
                 width: 20,
                 height: 40,
 
-                // カスタマイズ可能な描画処理
                 draw: function (ctx) {
-                    // デフォルト描画：サボテン風の深緑色
                     ctx.fillStyle = '#1b5e20';
                     ctx.fillRect(this.x, this.y, this.width, this.height);
-                    // 枝（トゲ表現）
                     ctx.fillRect(this.x - 4, this.y + 10, 6, 12);
                     ctx.fillRect(this.x + this.width - 2, this.y + 15, 6, 12);
                 }
             };
         }
 
-        // --- イベント入力 ---
+        // --- 入力処理 ---
         function handleInput() {
+            initAudio(); // 最初のタップ/操作でオーディオを有効化
+
             if (gameState === 'START') {
                 resetGame();
                 gameState = 'PLAYING';
@@ -118,6 +206,7 @@
                 if (player.isGrounded) {
                     player.velocityY = player.jumpPower;
                     player.isGrounded = false;
+                    playJumpSound();
                 }
             } else if (gameState === 'GAMEOVER') {
                 resetGame();
@@ -125,17 +214,19 @@
             }
         }
 
+        // キーボード操作
         window.addEventListener('keydown', (e) => {
             if (e.code === 'Space') {
-                e.preventDefault(); // 画面スクロール防止
+                e.preventDefault();
                 handleInput();
             }
         });
 
-        canvas.addEventListener('touchstart', (e) => {
+        // スマホタッチ操作
+        window.addEventListener('touchstart', (e) => {
             e.preventDefault();
             handleInput();
-        });
+        }, { passive: false });
 
         // --- ゲームリセット ---
         function resetGame() {
@@ -147,7 +238,6 @@
             nextSpawnTime = performance.now() + getRandomInterval();
         }
 
-        // 障害物の出現間隔（1.5秒〜3秒）
         function getRandomInterval() {
             return (1.5 + Math.random() * 1.5) * 1000;
         }
@@ -162,12 +252,11 @@
             );
         }
 
-        // --- メイン描画・更新ループ ---
+        // --- ループ処理 ---
         function gameLoop(timestamp) {
-            // 画面クリア
             ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
-            // 地面の描画
+            // 地面描画
             ctx.strokeStyle = '#555555';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -176,21 +265,18 @@
             ctx.stroke();
 
             if (gameState === 'START') {
-                // プレイヤー待機描画
                 player.draw(ctx);
 
-                // スタート画面テキスト
                 ctx.fillStyle = '#333333';
                 ctx.font = '20px sans-serif';
                 ctx.textAlign = 'center';
-                ctx.fillText('スペースキーで開始', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+                ctx.fillText('タップまたはスペースキーで開始', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
 
             } else if (gameState === 'PLAYING') {
-                // 1. スコア加算
                 score += 1;
-                const currentSpeed = baseSpeed + Math.floor(score / 500) * 0.5; // スコアに応じて少しずつ加速
+                const currentSpeed = baseSpeed + Math.floor(score / 500) * 0.5;
 
-                // 2. プレイヤー物理演算
+                // プレイヤー移動
                 player.velocityY += player.gravity;
                 player.y += player.velocityY;
 
@@ -202,39 +288,27 @@
 
                 player.draw(ctx);
 
-                // 3. 障害物の自動生成
+                // 障害物生成
                 if (timestamp >= nextSpawnTime) {
                     obstacles.push(createObstacle());
                     nextSpawnTime = timestamp + getRandomInterval();
                 }
 
-                // 4. 障害物の移動・描画・衝突判定
+                // 障害物移動・衝突
                 for (let i = obstacles.length - 1; i >= 0; i--) {
                     const obs = obstacles[i];
                     obs.x -= currentSpeed;
                     obs.draw(ctx);
 
-                    // 衝突判定
                     if (checkCollision(player, obs)) {
                         gameState = 'GAMEOVER';
+                        playGameOverSound();
                     }
 
-                    // 画面外に出た障害物の削除
                     if (obs.x + obs.width < 0) {
                         obstacles.splice(i, 1);
                     }
                 }
-
-                // 5. スコア表示
-                ctx.fillStyle = '#333333';
-                ctx.font = 'bold 18px monospace';
-                ctx.textAlign = 'right';
-                ctx.fillText(`SCORE: ${Math.floor(score)}`, CANVAS_WIDTH - 20, 35);
-
-            } else if (gameState === 'GAMEOVER') {
-                // 停止時の描画維持
-                player.draw(ctx);
-                obstacles.forEach(obs => obs.draw(ctx));
 
                 // スコア表示
                 ctx.fillStyle = '#333333';
@@ -242,7 +316,15 @@
                 ctx.textAlign = 'right';
                 ctx.fillText(`SCORE: ${Math.floor(score)}`, CANVAS_WIDTH - 20, 35);
 
-                // ゲームオーバー画面テキスト
+            } else if (gameState === 'GAMEOVER') {
+                player.draw(ctx);
+                obstacles.forEach(obs => obs.draw(ctx));
+
+                ctx.fillStyle = '#333333';
+                ctx.font = 'bold 18px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(`SCORE: ${Math.floor(score)}`, CANVAS_WIDTH - 20, 35);
+
                 ctx.fillStyle = '#d32f2f';
                 ctx.font = 'bold 28px sans-serif';
                 ctx.textAlign = 'center';
@@ -250,13 +332,12 @@
 
                 ctx.fillStyle = '#666666';
                 ctx.font = '16px sans-serif';
-                ctx.fillText('スペースキーでリトライ', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
+                ctx.fillText('タップまたはスペースキーでリトライ', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
             }
 
             animationFrameId = requestAnimationFrame(gameLoop);
         }
 
-        // 初回ループ起動
         animationFrameId = requestAnimationFrame(gameLoop);
     </script>
 
