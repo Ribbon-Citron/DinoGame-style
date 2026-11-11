@@ -1,0 +1,263 @@
+ご提示いただいた要件に基づき、HTML5 CanvasとJavaScript（単一ファイルでそのまま動作可能）による「恐竜の障害物ジャンプゲーム」のコード実装を作成しました。
+
+プレイヤー（恐竜）と障害物（サボテン）の描画処理を独立した関数として切り出しているため、見た目の変更や画像（`Image`オブジェクト）への差し替えが容易に行える設計になっています。
+
+``` html
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>恐竜の障害物ジャンプゲーム</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #e0e0e0;
+            font-family: sans-serif;
+        }
+
+        canvas {
+            background-color: #f7f7f7;
+            border: 1px solid #ccc;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+
+<body>
+
+    <canvas id="gameCanvas" width="800" height="300"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- ゲーム定数・設定 ---
+        const CANVAS_WIDTH = canvas.width;
+        const CANVAS_HEIGHT = canvas.height;
+        const GROUND_Y = CANVAS_HEIGHT - 20; // 地面のY座標 (280px)
+
+        // ゲーム状態: 'START', 'PLAYING', 'GAMEOVER'
+        let gameState = 'START';
+        let score = 0;
+        let animationFrameId = null;
+
+        // --- プレイヤー（恐竜）設定 ---
+        const player = {
+            x: 50,
+            y: GROUND_Y - 40,
+            width: 40,
+            height: 40,
+            velocityY: 0,
+            gravity: 0.8,
+            jumpPower: -13,
+            isGrounded: true,
+
+            // カスタマイズ可能な描画処理
+            draw: function (ctx) {
+                // デフォルト描画：緑色の四角形（目付き）
+                ctx.fillStyle = '#2e7d32';
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+
+                // 目
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(this.x + 25, this.y + 8, 8, 8);
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(this.x + 29, this.y + 10, 4, 4);
+            }
+        };
+
+        // --- 障害物（サボテン）管理 ---
+        let obstacles = [];
+        let nextSpawnTime = 0;
+        let baseSpeed = 5;
+
+        function createObstacle() {
+            return {
+                x: CANVAS_WIDTH,
+                y: GROUND_Y - 40,
+                width: 20,
+                height: 40,
+
+                // カスタマイズ可能な描画処理
+                draw: function (ctx) {
+                    // デフォルト描画：サボテン風の深緑色
+                    ctx.fillStyle = '#1b5e20';
+                    ctx.fillRect(this.x, this.y, this.width, this.height);
+                    // 枝（トゲ表現）
+                    ctx.fillRect(this.x - 4, this.y + 10, 6, 12);
+                    ctx.fillRect(this.x + this.width - 2, this.y + 15, 6, 12);
+                }
+            };
+        }
+
+        // --- イベント入力 ---
+        function handleInput() {
+            if (gameState === 'START') {
+                resetGame();
+                gameState = 'PLAYING';
+            } else if (gameState === 'PLAYING') {
+                if (player.isGrounded) {
+                    player.velocityY = player.jumpPower;
+                    player.isGrounded = false;
+                }
+            } else if (gameState === 'GAMEOVER') {
+                resetGame();
+                gameState = 'PLAYING';
+            }
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault(); // 画面スクロール防止
+                handleInput();
+            }
+        });
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            handleInput();
+        });
+
+        // --- ゲームリセット ---
+        function resetGame() {
+            score = 0;
+            obstacles = [];
+            player.y = GROUND_Y - player.height;
+            player.velocityY = 0;
+            player.isGrounded = true;
+            nextSpawnTime = performance.now() + getRandomInterval();
+        }
+
+        // 障害物の出現間隔（1.5秒〜3秒）
+        function getRandomInterval() {
+            return (1.5 + Math.random() * 1.5) * 1000;
+        }
+
+        // --- 衝突判定 ---
+        function checkCollision(rect1, rect2) {
+            return (
+                rect1.x < rect2.x + rect2.width &&
+                rect1.x + rect1.width > rect2.x &&
+                rect1.y < rect2.y + rect2.height &&
+                rect1.y + rect1.height > rect2.y
+            );
+        }
+
+        // --- メイン描画・更新ループ ---
+        function gameLoop(timestamp) {
+            // 画面クリア
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // 地面の描画
+            ctx.strokeStyle = '#555555';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, GROUND_Y);
+            ctx.lineTo(CANVAS_WIDTH, GROUND_Y);
+            ctx.stroke();
+
+            if (gameState === 'START') {
+                // プレイヤー待機描画
+                player.draw(ctx);
+
+                // スタート画面テキスト
+                ctx.fillStyle = '#333333';
+                ctx.font = '20px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('スペースキーで開始', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+
+            } else if (gameState === 'PLAYING') {
+                // 1. スコア加算
+                score += 1;
+                const currentSpeed = baseSpeed + Math.floor(score / 500) * 0.5; // スコアに応じて少しずつ加速
+
+                // 2. プレイヤー物理演算
+                player.velocityY += player.gravity;
+                player.y += player.velocityY;
+
+                if (player.y >= GROUND_Y - player.height) {
+                    player.y = GROUND_Y - player.height;
+                    player.velocityY = 0;
+                    player.isGrounded = true;
+                }
+
+                player.draw(ctx);
+
+                // 3. 障害物の自動生成
+                if (timestamp >= nextSpawnTime) {
+                    obstacles.push(createObstacle());
+                    nextSpawnTime = timestamp + getRandomInterval();
+                }
+
+                // 4. 障害物の移動・描画・衝突判定
+                for (let i = obstacles.length - 1; i >= 0; i--) {
+                    const obs = obstacles[i];
+                    obs.x -= currentSpeed;
+                    obs.draw(ctx);
+
+                    // 衝突判定
+                    if (checkCollision(player, obs)) {
+                        gameState = 'GAMEOVER';
+                    }
+
+                    // 画面外に出た障害物の削除
+                    if (obs.x + obs.width < 0) {
+                        obstacles.splice(i, 1);
+                    }
+                }
+
+                // 5. スコア表示
+                ctx.fillStyle = '#333333';
+                ctx.font = 'bold 18px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(`SCORE: ${Math.floor(score)}`, CANVAS_WIDTH - 20, 35);
+
+            } else if (gameState === 'GAMEOVER') {
+                // 停止時の描画維持
+                player.draw(ctx);
+                obstacles.forEach(obs => obs.draw(ctx));
+
+                // スコア表示
+                ctx.fillStyle = '#333333';
+                ctx.font = 'bold 18px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText(`SCORE: ${Math.floor(score)}`, CANVAS_WIDTH - 20, 35);
+
+                // ゲームオーバー画面テキスト
+                ctx.fillStyle = '#d32f2f';
+                ctx.font = 'bold 28px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('GAME OVER', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 10);
+
+                ctx.fillStyle = '#666666';
+                ctx.font = '16px sans-serif';
+                ctx.fillText('スペースキーでリトライ', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 25);
+            }
+
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+        // 初回ループ起動
+        animationFrameId = requestAnimationFrame(gameLoop);
+    </script>
+
+</body>
+
+</html>
+
+```
+
+### カスタマイズ方法
+
+1. **プレイヤー画像の変更**: `player.draw` 関数内で `ctx.fillRect` を使用している部分を `ctx.drawImage(imageObj, this.x, this.y, this.width,
+this.height)` に差し替えることで画像表示に切り替えられます。
+2. **障害物のバリエーション**: `createObstacle` 関数内で幅（`width`）や高さ（`height`）にランダム値を持たせたり、描画パターンを切り替えることが可能です。
+
+プレイヤーや障害物を画像データへ変更する具体的なコード例への差し替えや、追加機能（空飛ぶ障害物、ハイスコア記録など）の実装をご希望の際はお申し付けください。
